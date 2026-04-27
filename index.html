@@ -1,0 +1,149 @@
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+
+<video id="videoElement" autoplay playsinline style="width: 100%; border-radius: 12px; display: none;"></video>
+<canvas id="canvasElement" style="display:none"></canvas>
+
+<script>
+// --- EXTENDED STATE ---
+  
+state.aiBaseUrl = 'https://interview-genie.onrender.com/'; // Change to your Render URL after deployment
+state.recognition = null;
+state.isRecording = false;
+state.videoStats = { eyeContact: 0, movement: 0 };
+
+// --- 1. VOICE ANALYSIS (WEB SPEECH API) ---
+function initVoice() {
+    window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!window.SpeechRecognition) return toast("Speech API not supported", "error");
+    
+    state.recognition = new SpeechRecognition();
+    state.recognition.continuous = true;
+    state.recognition.interimResults = true;
+
+    state.recognition.onresult = (event) => {
+        const transcript = Array.from(event.results)
+            .map(result => result[0].transcript).join('');
+        document.getElementById('answerInput').value = transcript;
+    };
+}
+
+function toggleVoice() {
+    if (!state.recognition) initVoice();
+    if (state.isRecording) {
+        state.recognition.stop();
+        state.isRecording = false;
+        toast("Recording stopped", "info");
+    } else {
+        state.recognition.start();
+        state.isRecording = true;
+        toast("Listening...", "success");
+    }
+}
+
+// --- 2. CAMERA & BODY LANGUAGE (MEDIAPIPE) ---
+async function initVideo() {
+    const video = document.getElementById('videoElement');
+    video.style.display = 'block';
+    document.querySelector('.video-area').style.display = 'none';
+
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5 });
+    faceMesh.onResults(onFaceResults);
+
+    const camera = new Camera(video, {
+      onFrame: async () => { await faceMesh.send({image: video}); },
+      width: 640, height: 480
+    });
+    camera.start();
+}
+
+function onFaceResults(results) {
+    if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+        const landmarks = results.multiFaceLandmarks[0];
+        // Basic Logic: Check if Iris is centered relative to eye corners
+        const leftIris = landmarks[468];
+        const rightIris = landmarks[473];
+        if (leftIris.x > 0.4 && leftIris.x < 0.6) state.videoStats.eyeContact++;
+    }
+}
+
+// --- 3. RESUME ANALYSIS (PDF.JS + AI) ---
+async function handleResumeUpload(e) {
+    const file = e.target.files[0];
+    const reader = new FileReader();
+    reader.onload = async function() {
+        const typedarray = new Uint8Array(this.result);
+        const pdf = await pdfjsLib.getDocument(typedarray).promise;
+        let fullText = "";
+        for(let i=1; i<=pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            fullText += textContent.items.map(s => s.str).join(" ");
+        }
+        
+        // Send to Backend
+        const area = document.getElementById('resumeFeedbackArea');
+        area.classList.remove('hidden');
+        area.innerHTML = `<div class="spinner"></div><p>AI analyzing your experience...</p>`;
+
+        const response = await fetch(`${state.aiBaseUrl}/resume-analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: fullText })
+        });
+        const data = await response.json();
+        renderResumeFeedback(data);
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+function renderResumeFeedback(data) {
+    const area = document.getElementById('resumeFeedbackArea');
+    area.innerHTML = `
+        <h3>AI Score: ${data.score}/100</h3>
+        <div class="feedback-item tip"><strong>Strengths:</strong> ${data.strengths.join(', ')}</div>
+        <div class="feedback-item warn"><strong>Weaknesses:</strong> ${data.weaknesses.join(', ')}</div>
+    `;
+}
+
+// --- 4. IMPROVED INTERVIEW FEEDBACK ---
+async function nextQuestion() {
+    const iv = state.interview;
+    const currentQ = iv.questions[iv.index].textContent;
+    const userAns = document.getElementById('answerInput').value;
+
+    // Call AI Evaluation while loading next
+    fetch(`${state.aiBaseUrl}/evaluate-answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: currentQ, answer: userAns, category: iv.category })
+    }).then(res => res.json()).then(data => {
+        iv.answers.push({ text: userAns, aiScore: data.score, aiFeedback: data.feedback });
+    });
+
+    iv.index++;
+    if(iv.index < iv.questions.length) { loadQuestion(); startTimer(); } 
+    else { showResult(); }
+}
+
+// --- 5. HR CONTACT QR CODES ---
+function renderHRCards() {
+    document.getElementById('hrCardsContainer').innerHTML = hrData.map((hr, i) => {
+        const qrData = `BEGIN:VCARD\nFN:${hr.name}\nORG:${hr.company}\nEMAIL:${hr.name.toLowerCase().replace(' ', '.')}@company.com\nEND:VCARD`;
+        const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(qrData)}`;
+        
+        return `
+            <div class="hr-card" onclick="showHRDetail(${i})">
+                <div class="hr-avatar" style="background:${hr.color}">${hr.name.split(' ').map(w=>w[0]).join('')}</div>
+                <h3>${hr.name}</h3>
+                <img src="${qrUrl}" style="width:80px; margin-top:10px">
+                <div class="hr-company">${hr.company}</div>
+            </div>`;
+    }).join('');
+}
+      </script>
